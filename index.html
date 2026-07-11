@@ -994,11 +994,24 @@
     <h3>🏆 SCOREBOARD</h3>
     <div style="color:#a99ae0; font-size:13px;">Champions who won ₹25 Lakh or more, ranked by winnings</div>
     <div class="board-list" id="boardList"></div>
+    <div id="boardStats" style="margin-top:12px; color:#8d7fd0; font-size:12px; letter-spacing:1px;"></div>
     <button class="btn-gold" onclick="closeModal('boardModal')">CLOSE</button>
   </div>
 </div>
 
 <script>
+/* =================== ONLINE SCOREBOARD (shared by ALL players) ===================
+   Paste your Firebase Realtime Database URL below and every player — on any
+   device — will see the same top-winners board and be counted.
+   How to get one (free, ~5 minutes):
+     1. Go to https://console.firebase.google.com and sign in with your Google account
+     2. "Create a project" (any name, e.g. kbc-100-crore; Analytics not needed)
+     3. Left menu: Build → Realtime Database → "Create Database" → start in TEST MODE
+     4. Copy the database URL shown at the top (looks like
+        https://kbc-100-crore-xxxxx-default-rtdb.firebaseio.com) and paste it here:
+   Leave it empty ("") and the scoreboard works on this device only.            */
+const REMOTE_DB = "";
+
 /* =================== DATA =================== */
 /* 15 difficulty levels, 400 questions total (20 per easy/medium level 1–7,
    32–33 per hard level 8–15) — one is picked randomly per level, and asked
@@ -1735,19 +1748,58 @@ function paintLadder(){
 }
 
 /* =================== HALL OF FAME / SCOREBOARD =================== */
+// remote entries come from a public database — escape and cap them before rendering
+const esc = s => String(s).slice(0,24).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// older entries had no numeric value — fill it from the prize label
+const entryVal = x => x.v !== undefined ? (Number(x.v)||0) : (PRIZE_VAL[x.p]||0);
+// only serious winners make the board — ₹25 Lakh and above, biggest first
+const topWinners = list => list.map(x=>({ ...x, v: entryVal(x) })).filter(x => x.v >= 2500000).sort((a,b)=> b.v - a.v);
+
 function getHof(){
   let list = [];
   try{ list = JSON.parse(localStorage.getItem("kbc_hof")||"[]"); }catch(e){}
-  // older entries had no numeric value/date — fill value from the prize label
-  return list.map(x=>({ ...x, v: x.v !== undefined ? x.v : (PRIZE_VAL[x.p]||0) }));
+  return list.map(x=>({ ...x, v: entryVal(x) }));
 }
+
+/* ---- online sync: every finished game is pushed to the shared database ---- */
+function remoteSave(entry){
+  if(!REMOTE_DB) return;
+  try{
+    // keepalive lets the save finish even if the tab is closed mid-celebration
+    fetch(REMOTE_DB.replace(/\/+$/,"") + "/kbc/scores.json",
+          { method:"POST", body:JSON.stringify(entry), keepalive:true }).catch(()=>{});
+  }catch(e){}
+}
+async function remoteList(){
+  if(!REMOTE_DB) return null;
+  try{
+    const r = await fetch(REMOTE_DB.replace(/\/+$/,"") + "/kbc/scores.json");
+    if(!r.ok) return null;
+    const data = await r.json();
+    return Object.values(data||{}).filter(x => x && x.n && x.p);
+  }catch(e){ return null; }
+}
+/* worldwide games + this device's history (own games exist in both — de-duplicated) */
+function mergeRemote(remote){
+  const local = getHof();
+  if(!remote) return { list:local, games:null, players:null };
+  const seen = new Set(remote.map(x => x.n+"|"+x.p+"|"+x.d));
+  return {
+    list: remote.concat(local.filter(x => !seen.has(x.n+"|"+x.p+"|"+x.d))),
+    games: remote.length,
+    players: new Set(remote.map(x => String(x.n).trim().toLowerCase())).size
+  };
+}
+
 function loadHof(){
   const el = document.getElementById("hof");
-  // home page shows only real winners — ₹25 Lakh and above, same as the scoreboard
-  const list = getHof().filter(x => x.v >= 2500000).sort((a,b)=> b.v - a.v);
-  if(!list.length){ el.innerHTML=""; return; }
-  el.innerHTML = "<h4>👑 TOP WINNERS</h4>" +
-    list.slice(0,3).map((x,i)=>`<div>${["🥇","🥈","🥉"][i]} <b>${x.n}</b> — ${x.p}</div>`).join("");
+  const render = list => {
+    if(!list.length){ el.innerHTML=""; return; }
+    el.innerHTML = "<h4>👑 TOP WINNERS</h4>" +
+      list.slice(0,3).map((x,i)=>`<div>${["🥇","🥈","🥉"][i]} <b>${esc(x.n)}</b> — ${esc(x.p)}</div>`).join("");
+  };
+  render(topWinners(getHof()));                                            // instant, from this device
+  remoteList().then(r=>{ if(r) render(topWinners(mergeRemote(r).list)); }); // then the worldwide list
 }
 function saveHof(name, prize){
   if(hofSaved) return;               // reveal() saves the moment the game is decided — endGame is the fallback
@@ -1755,27 +1807,41 @@ function saveHof(name, prize){
   let list = [];
   try{ list = JSON.parse(localStorage.getItem("kbc_hof")||"[]"); }catch(e){}
   const d = new Date().toLocaleDateString("en-IN", {day:"numeric", month:"short", year:"2-digit"});
-  list.unshift({n:name, p:prize, v:PRIZE_VAL[prize]||0, d:d});
+  const entry = {n:name, p:prize, v:PRIZE_VAL[prize]||0, d:d, t:Date.now()};
+  list.unshift(entry);
   // real winners (₹25 Lakh+) must never be pushed off the board by later games —
   // keep the 50 biggest wins forever; only the small results are capped by recency
-  const val = x => x.v !== undefined ? x.v : (PRIZE_VAL[x.p]||0);
-  const winners = list.filter(x => val(x) >= 2500000).sort((a,b)=> val(b)-val(a)).slice(0,50);
-  const rest    = list.filter(x => val(x) <  2500000).slice(0,20);
-  localStorage.setItem("kbc_hof", JSON.stringify(winners.concat(rest)));
+  const big  = list.filter(x => entryVal(x) >= 2500000).sort((a,b)=> entryVal(b)-entryVal(a)).slice(0,50);
+  const rest = list.filter(x => entryVal(x) <  2500000).slice(0,20);
+  localStorage.setItem("kbc_hof", JSON.stringify(big.concat(rest)));
+  remoteSave(entry);
 }
-function openBoard(){
-  // only serious winners make the board — ₹25 Lakh and above
-  const list = getHof().filter(x => x.v >= 2500000).sort((a,b)=> b.v - a.v);
+function renderBoard(list, games, players){
   const el = document.getElementById("boardList");
   if(!list.length){
     el.innerHTML = '<div class="board-empty">No one has crossed ₹25 Lakh yet — be the first! 🎬</div>';
   } else {
-    el.innerHTML = list.map((x,i)=>{
+    el.innerHTML = list.slice(0,50).map((x,i)=>{
       const medal = i<3 ? ["🥇","🥈","🥉"][i] : (i+1);
-      return `<div class="board-row${i<3?" top":""}"><span class="rk">${medal}</span><span class="bn">${x.n}</span><span class="bd">${x.d||""}</span><span class="bp">${x.p}</span></div>`;
+      return `<div class="board-row${i<3?" top":""}"><span class="rk">${medal}</span><span class="bn">${esc(x.n)}</span><span class="bd">${esc(x.d||"")}</span><span class="bp">${esc(x.p)}</span></div>`;
     }).join("");
   }
+  const st = document.getElementById("boardStats");
+  st.textContent = games === null
+    ? (REMOTE_DB ? "Connecting to the worldwide board…" : "")
+    : `🎮 ${games} game${games===1?"":"s"} played  •  👥 ${players} player${players===1?"":"s"} worldwide`;
+}
+function openBoard(){
+  renderBoard(topWinners(getHof()), null, null);          // instant, from this device
   openModal("boardModal");
+  remoteList().then(r=>{                                   // then the worldwide list
+    if(!r){
+      if(REMOTE_DB) document.getElementById("boardStats").textContent = "⚠ Online board unreachable — showing this device only";
+      return;
+    }
+    const m = mergeRemote(r);
+    renderBoard(topWinners(m.list), m.games, m.players);
+  });
 }
 document.getElementById("boardBtn").onclick = openBoard;
 document.getElementById("boardBtn2").onclick = openBoard;
