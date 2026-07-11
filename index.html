@@ -1458,6 +1458,7 @@ let used = { fifty:false, phone:false, poll:false, flip:false, expert:false };
 let removedOpts = [];
 let muted = false;
 let currentQ = null, currentQi = -1;
+let hofSaved = false;                // one scoreboard entry per game
 
 /* no-repeat question picker — remembers every asked question across games */
 let askedIds = new Set();
@@ -1749,11 +1750,18 @@ function loadHof(){
     list.slice(0,3).map((x,i)=>`<div>${["🥇","🥈","🥉"][i]} <b>${x.n}</b> — ${x.p}</div>`).join("");
 }
 function saveHof(name, prize){
+  if(hofSaved) return;               // reveal() saves the moment the game is decided — endGame is the fallback
+  hofSaved = true;
   let list = [];
   try{ list = JSON.parse(localStorage.getItem("kbc_hof")||"[]"); }catch(e){}
   const d = new Date().toLocaleDateString("en-IN", {day:"numeric", month:"short", year:"2-digit"});
   list.unshift({n:name, p:prize, v:PRIZE_VAL[prize]||0, d:d});
-  localStorage.setItem("kbc_hof", JSON.stringify(list.slice(0,50)));
+  // real winners (₹25 Lakh+) must never be pushed off the board by later games —
+  // keep the 50 biggest wins forever; only the small results are capped by recency
+  const val = x => x.v !== undefined ? x.v : (PRIZE_VAL[x.p]||0);
+  const winners = list.filter(x => val(x) >= 2500000).sort((a,b)=> val(b)-val(a)).slice(0,50);
+  const rest    = list.filter(x => val(x) <  2500000).slice(0,20);
+  localStorage.setItem("kbc_hof", JSON.stringify(winners.concat(rest)));
 }
 function openBoard(){
   // only serious winners make the board — ₹25 Lakh and above
@@ -1807,6 +1815,7 @@ function startGame(){
   player = nm;
   stopHomeTheme();
   qIndex = 0;
+  hofSaved = false;
   used = { fifty:false, phone:false, poll:false, flip:false, expert:false };
   ["lf50","lfPhone","lfPoll","lfFlip","lfExpert"].forEach(id=>document.getElementById(id).classList.remove("used"));
   document.getElementById("chipName").textContent = player;
@@ -1874,6 +1883,7 @@ function timeUp(){
   sndWrong();
   flash("redFlash");
   co.classList.add("correct");
+  saveHof(player, safePrize());
   setTimeout(()=> endGame(false, true), 1800);
 }
 
@@ -1903,6 +1913,7 @@ function reveal(i){
     const big = won >= 8;                 // ₹25 Lakh+ → flying cheque ceremony
     if(big) setTimeout(()=> showCheque(won), 1300);
     if(won === BANK.length-1){
+      saveHof(player, PRIZES[won]);   // record the champion NOW — closing during the celebration must not lose the win
       setTimeout(()=> endGame(true), big ? 6300 : 1400);
     } else {
       qIndex++;
@@ -1913,6 +1924,7 @@ function reveal(i){
     opt.classList.add("wrong");
     sndWrong();
     flash("redFlash");
+    saveHof(player, safePrize());
     setTimeout(()=>{
       document.querySelector(`.opt[data-i="${Q.c}"]`).classList.add("correct");
     }, 800);
@@ -1943,6 +1955,13 @@ function showCheque(level){
   setTimeout(()=> c.classList.remove("show"), 4700);
 }
 
+// safe-haven logic: the prize protected by the last milestone crossed
+function safePrize(){
+  let safe = -1;
+  for(const m of MILESTONES){ if(qIndex > m) safe = m; }
+  return safe >= 0 ? PRIZES[safe] : "₹0";
+}
+
 function endGame(champion, timedOut){
   stopQBed();
   let prize, label, msg;
@@ -1950,23 +1969,21 @@ function endGame(champion, timedOut){
     prize = "₹100 CRORE";
     label = "CHAMPION!";
     msg = `<b>${player}</b>, you have made history! All 15 questions conquered.<br>You are the <b>KAUN BANEGA 100 CRORE PATI</b> champion! 👑`;
-    document.getElementById("resultCrown").style.display = "block";
-    sndWinFanfare();
-    startConfetti();
-    setTimeout(sndWinFanfare, 2000);
   } else {
-    // safe-haven logic: keep last milestone crossed
-    let safe = -1;
-    for(const m of MILESTONES){ if(qIndex > m) safe = m; }
-    prize = safe >= 0 ? PRIZES[safe] : "₹0";
+    prize = safePrize();
     label = "You take home";
     msg = timedOut
       ? `Time ran out, <b>${player}</b>! You answered <b>${qIndex}</b> question${qIndex===1?"":"s"} correctly.`
       : `Hard luck, <b>${player}</b>! You answered <b>${qIndex}</b> question${qIndex===1?"":"s"} correctly.`;
-    msg += safe >= 0 ? `<br>The safe haven protects your <b>${prize}</b>. Come back stronger! 💪` : `<br>No safe haven reached this time — but champions always return! 💪`;
-    document.getElementById("resultCrown").style.display = "none";
+    msg += prize !== "₹0" ? `<br>The safe haven protects your <b>${prize}</b>. Come back stronger! 💪` : `<br>No safe haven reached this time — but champions always return! 💪`;
   }
-  saveHof(player, prize);
+  saveHof(player, prize);            // fallback — normally already saved at reveal; must run before any celebration effect
+  document.getElementById("resultCrown").style.display = champion ? "block" : "none";
+  if(champion){
+    sndWinFanfare();
+    startConfetti();
+    setTimeout(sndWinFanfare, 2000);
+  }
   document.getElementById("resultLabel").textContent = label;
   document.getElementById("resultAmount").textContent = prize;
   document.getElementById("resultMsg").innerHTML = msg;
